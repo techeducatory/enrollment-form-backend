@@ -1,0 +1,492 @@
+// server/index.js
+const express = require('express');
+const cors = require('cors');
+const bodyParser = require('body-parser');
+const multer = require('multer');
+const path = require('path');
+const dotenv = require('dotenv');
+const enrollmentRoutes = require('./routes/enrollmentRoutes');
+const paymentRoutes = require('./routes/paymentRoutes');
+const connectDB = require('./config/db');
+
+dotenv.config();
+
+// Initialize express app
+const app = express();
+
+// Connect to database
+connectDB();
+
+// Middleware
+app.use(cors());
+app.use(bodyParser.json());
+app.use(bodyParser.urlencoded({ extended: true }));
+
+// File upload configuration
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = file.fieldname === 'photo' ? 'uploads/photos' : 'uploads/documents';
+    cb(null, path.join(__dirname, uploadDir));
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+  }
+});
+
+const fileFilter = (req, file, cb) => {
+  if (file.fieldname === 'photo') {
+    if (file.mimetype === 'image/jpeg' || file.mimetype === 'image/png') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JPEG and PNG files are allowed for photos'), false);
+    }
+  } else if (file.fieldname === 'aadharPdf') {
+    if (file.mimetype === 'application/pdf') {
+      cb(null, true);
+    } else {
+      cb(new Error('Only PDF files are allowed for Aadhar documents'), false);
+    }
+  } else {
+    cb(null, false);
+  }
+};
+
+const upload = multer({
+  storage: storage,
+  limits: {
+    fileSize: file => {
+      if (file.fieldname === 'photo') {
+        return 2 * 1024 * 1024; // 2MB limit for photos
+      } else {
+        return 5 * 1024 * 1024; // 5MB limit for documents
+      }
+    }
+  },
+  fileFilter: fileFilter
+});
+
+// Make uploads directory accessible
+app.use('/uploads', express.static(path.join(__dirname, 'uploads')));
+
+// Routes
+app.use('/api/enrollments', enrollmentRoutes);
+app.use('/api/payments', paymentRoutes);
+
+// Error handling middleware
+app.use((err, req, res, next) => {
+  console.error(err.stack);
+  res.status(500).json({ 
+    success: false, 
+    message: 'Server error', 
+    error: process.env.NODE_ENV === 'development' ? err.message : undefined 
+  });
+});
+
+// Start server
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// server/config/db.js
+const mysql = require('mysql2/promise');
+const dotenv = require('dotenv');
+
+dotenv.config();
+
+const pool = mysql.createPool({
+  host: process.env.DB_HOST || 'localhost',
+  user: process.env.DB_USER || 'root',
+  password: process.env.DB_PASSWORD || '',
+  database: process.env.DB_NAME || 'course_enrollment',
+  waitForConnections: true,
+  connectionLimit: 10,
+  queueLimit: 0
+});
+
+const connectDB = async () => {
+  try {
+    await pool.getConnection();
+    console.log('MySQL Database connected');
+    
+    // Check if tables exist, if not create them
+    await initializeTables();
+  } catch (error) {
+    console.error('MySQL connection error:', error);
+    process.exit(1);
+  }
+};
+
+const initializeTables = async () => {
+  try {
+    // Create enrollments table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS enrollments (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        enrollment_id VARCHAR(20) UNIQUE NOT NULL,
+        first_name VARCHAR(100) NOT NULL,
+        last_name VARCHAR(100) NOT NULL,
+        email VARCHAR(100) NOT NULL,
+        phone VARCHAR(15) NOT NULL,
+        aadhar_number VARCHAR(12) NOT NULL,
+        address TEXT NOT NULL,
+        city VARCHAR(100) NOT NULL,
+        state VARCHAR(100) NOT NULL,
+        pin_code VARCHAR(10) NOT NULL,
+        school_name VARCHAR(200),
+        school_address TEXT,
+        father_name VARCHAR(100),
+        father_occupation VARCHAR(100),
+        father_phone VARCHAR(15),
+        father_email VARCHAR(100),
+        father_address TEXT,
+        mother_name VARCHAR(100),
+        mother_occupation VARCHAR(100),
+        mother_phone VARCHAR(15),
+        mother_email VARCHAR(100),
+        mother_address TEXT,
+        reference_source VARCHAR(50),
+        photo_path VARCHAR(255),
+        aadhar_pdf_path VARCHAR(255),
+        enrollment_status ENUM('pending', 'payment_completed', 'completed') DEFAULT 'pending',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Create payments table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS payments (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        enrollment_id VARCHAR(20) NOT NULL,
+        razorpay_order_id VARCHAR(255) NOT NULL,
+        razorpay_payment_id VARCHAR(255),
+        amount DECIMAL(10, 2) NOT NULL,
+        currency VARCHAR(10) NOT NULL DEFAULT 'INR',
+        status ENUM('created', 'attempted', 'completed', 'failed') DEFAULT 'created',
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
+        FOREIGN KEY (enrollment_id) REFERENCES enrollments(enrollment_id)
+      )
+    `);
+
+    console.log('Database tables initialized');
+  } catch (error) {
+    console.error('Error initializing tables:', error);
+    throw error;
+  }
+};
+
+module.exports = {
+  connectDB,
+  pool
+};
+
+// server/controllers/enrollmentController.js
+const { pool } = require('../config/db');
+const { generateEnrollmentId } = require('../utils/helpers');
+
+// Create initial enrollment with basic details
+exports.createEnrollment = async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { 
+      firstName, lastName, email, phone, aadharNumber,
+      address, city, state, pinCode
+    } = req.body;
+    
+    // Generate a unique enrollment ID
+    const enrollmentId = generateEnrollmentId();
+    
+    // Insert into enrollments table
+    const [result] = await connection.query(
+      `INSERT INTO enrollments 
+      (enrollment_id, first_name, last_name, email, phone, aadhar_number, address, city, state, pin_code) 
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      [enrollmentId, firstName, lastName, email, phone, aadharNumber, address, city, state, pinCode]
+    );
+    
+    await connection.commit();
+    
+    res.status(201).json({
+      success: true,
+      enrollmentId,
+      message: 'Basic details saved successfully'
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error creating enrollment:', error);
+    res.status(500).json({ success: false, message: 'Failed to create enrollment', error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
+// Update enrollment with complete details
+exports.updateEnrollment = async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const enrollmentId = req.body.enrollmentId;
+    const photoPath = req.files?.photo ? req.files.photo[0].path : null;
+    const aadharPdfPath = req.files?.aadharPdf ? req.files.aadharPdf[0].path : null;
+    
+    const {
+      schoolName, schoolAddress,
+      fatherName, fatherOccupation, fatherPhone, fatherEmail, fatherAddress,
+      motherName, motherOccupation, motherPhone, motherEmail, motherAddress,
+      referenceSource
+    } = req.body;
+    
+    // Update enrollment record
+    const [result] = await connection.query(
+      `UPDATE enrollments SET
+        school_name = ?,
+        school_address = ?,
+        father_name = ?,
+        father_occupation = ?,
+        father_phone = ?,
+        father_email = ?,
+        father_address = ?,
+        mother_name = ?,
+        mother_occupation = ?,
+        mother_phone = ?,
+        mother_email = ?,
+        mother_address = ?,
+        reference_source = ?,
+        photo_path = COALESCE(?, photo_path),
+        aadhar_pdf_path = COALESCE(?, aadhar_pdf_path),
+        enrollment_status = 'completed'
+      WHERE enrollment_id = ?`,
+      [
+        schoolName, schoolAddress,
+        fatherName, fatherOccupation, fatherPhone, fatherEmail, fatherAddress,
+        motherName, motherOccupation, motherPhone, motherEmail, motherAddress,
+        referenceSource, photoPath, aadharPdfPath, enrollmentId
+      ]
+    );
+    
+    if (result.affectedRows === 0) {
+      await connection.rollback();
+      return res.status(404).json({ success: false, message: 'Enrollment not found' });
+    }
+    
+    await connection.commit();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Enrollment completed successfully'
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error updating enrollment:', error);
+    res.status(500).json({ success: false, message: 'Failed to update enrollment', error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
+// Get enrollment by ID
+exports.getEnrollment = async (req, res) => {
+  try {
+    const enrollmentId = req.params.id;
+    
+    const [rows] = await pool.query(
+      'SELECT * FROM enrollments WHERE enrollment_id = ?',
+      [enrollmentId]
+    );
+    
+    if (rows.length === 0) {
+      return res.status(404).json({ success: false, message: 'Enrollment not found' });
+    }
+    
+    res.status(200).json({
+      success: true,
+      data: rows[0]
+    });
+  } catch (error) {
+    console.error('Error fetching enrollment:', error);
+    res.status(500).json({ success: false, message: 'Failed to fetch enrollment', error: error.message });
+  }
+};
+
+// server/controllers/paymentController.js
+const { pool } = require('../config/db');
+const Razorpay = require('razorpay');
+const crypto = require('crypto');
+
+// Initialize Razorpay
+const razorpay = new Razorpay({
+  key_id: process.env.RAZORPAY_KEY_ID,
+  key_secret: process.env.RAZORPAY_KEY_SECRET
+});
+
+// Create a Razorpay order
+exports.createOrder = async (req, res) => {
+  try {
+    const { amount, currency, receipt, notes } = req.body;
+    
+    const options = {
+      amount: amount, // amount in the smallest currency unit (paise for INR)
+      currency: currency || 'INR',
+      receipt: receipt,
+      notes: notes
+    };
+    
+    const order = await razorpay.orders.create(options);
+    
+    // Store order in database
+    await pool.query(
+      `INSERT INTO payments (enrollment_id, razorpay_order_id, amount, currency) VALUES (?, ?, ?, ?)`,
+      [notes.enrollmentId, order.id, amount/100, currency || 'INR']
+    );
+    
+    res.status(200).json(order);
+  } catch (error) {
+    console.error('Error creating order:', error);
+    res.status(500).json({ success: false, message: 'Failed to create order', error: error.message });
+  }
+};
+
+// Verify Razorpay payment
+exports.verifyPayment = async (req, res) => {
+  const connection = await pool.getConnection();
+  
+  try {
+    await connection.beginTransaction();
+    
+    const { razorpay_order_id, razorpay_payment_id, razorpay_signature, enrollmentId } = req.body;
+    
+    // Verify signature
+    const generatedSignature = crypto
+      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .update(razorpay_order_id + "|" + razorpay_payment_id)
+      .digest('hex');
+    
+    if (generatedSignature !== razorpay_signature) {
+      await connection.rollback();
+      return res.status(400).json({ success: false, message: 'Invalid payment signature' });
+    }
+    
+    // Update payment status in database
+    await connection.query(
+      `UPDATE payments SET razorpay_payment_id = ?, status = 'completed' WHERE razorpay_order_id = ?`,
+      [razorpay_payment_id, razorpay_order_id]
+    );
+    
+    // Update enrollment status
+    await connection.query(
+      `UPDATE enrollments SET enrollment_status = 'payment_completed' WHERE enrollment_id = ?`,
+      [enrollmentId]
+    );
+    
+    await connection.commit();
+    
+    res.status(200).json({
+      success: true,
+      message: 'Payment verified successfully'
+    });
+  } catch (error) {
+    await connection.rollback();
+    console.error('Error verifying payment:', error);
+    res.status(500).json({ success: false, message: 'Failed to verify payment', error: error.message });
+  } finally {
+    connection.release();
+  }
+};
+
+// server/routes/enrollmentRoutes.js
+const express = require('express');
+const router = express.Router();
+const multer = require('multer');
+const path = require('path');
+const enrollmentController = require('../controllers/enrollmentController');
+
+// File upload configuration
+const storage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadDir = file.fieldname === 'photo' ? 'uploads/photos' : 'uploads/documents';
+    cb(null, path.join(__dirname, '../', uploadDir));
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    cb(null, file.fieldname + '-' + uniqueSuffix + ext);
+  }
+});
+
+const upload = multer({ 
+  storage: storage,
+  limits: {
+    fileSize: 5 * 1024 * 1024 // 5MB max file size
+  }
+});
+
+// Handle file uploads for updating enrollment
+const uploadFields = upload.fields([
+  { name: 'photo', maxCount: 1 },
+  { name: 'aadharPdf', maxCount: 1 }
+]);
+
+// Create enrollment route (basic details)
+router.post('/', enrollmentController.createEnrollment);
+
+// Update enrollment route (complete details)
+router.put('/:id', uploadFields, enrollmentController.updateEnrollment);
+
+// Get enrollment details
+router.get('/:id', enrollmentController.getEnrollment);
+
+module.exports = router;
+
+// server/routes/paymentRoutes.js
+const express = require('express');
+const router = express.Router();
+const paymentController = require('../controllers/paymentController');
+
+// Create a new Razorpay order
+router.post('/create-order', paymentController.createOrder);
+
+// Verify payment
+router.post('/verify', paymentController.verifyPayment);
+
+module.exports = router;
+
+// server/utils/helpers.js
+/**
+ * Generate a unique enrollment ID
+ * @returns {string} Enrollment ID in format ENRL-YYYYMMDD-XXXXX
+ */
+exports.generateEnrollmentId = () => {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const random = Math.floor(Math.random() * 100000).toString().padStart(5, '0');
+  
+  return `ENRL-${year}${month}${day}-${random}`;
+};
+
+// .env (create this file in the server root directory)
+PORT=5000
+NODE_ENV=development
+
+# Database Configuration
+DB_HOST=localhost
+DB_USER=root
+DB_PASSWORD=your_mysql_password
+DB_NAME=course_enrollment
+
+# Razorpay Configuration
+RAZORPAY_KEY_ID=your_razorpay_key_id
+RAZORPAY_KEY_SECRET=your_razorpay_key_secret
+
+# File Upload Paths
+UPLOAD_PATH=uploads
