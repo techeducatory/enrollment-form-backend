@@ -69,7 +69,7 @@ exports.verifyPayment = async (req, res) => {
     
     // Mark coupons as used if any
     if (appliedCoupons && appliedCoupons.length > 0) {
-      await markCouponsAsUsed(appliedCoupons, razorpay_payment_id, connection);
+      await markCouponsAsUsed(appliedCoupons, razorpay_payment_id, enrollmentId, connection);
       
       // Notify users about coupon usage
       for (const coupon of appliedCoupons) {

@@ -80,14 +80,23 @@ const generateEnrollmentPDF = async (data) => {
       };
 
       // Course & Payment Details Section
-      createSection('Registration Information', [
-        ['Registration ID / Enrollment ID / Roll No.', data.enrollment_id],
-        // ['Course Name', data.course_name],
-        // ['Course Fee', 'Rs. ' + data.course_fee],
-        // ['Payment ID', data.payment_id || 'N/A'],
-        // ['Payment Status', data.enrollment_status === 'completed' ? 'Completed' : 'Pending'],
-        // ['Payment Date', data.payment_date ? new Date(data.payment_date).toLocaleDateString('en-IN') : 'N/A']
-      ]);
+      // Registration Information section with extra spacing and no border/background
+      doc.moveDown(1.5);
+      doc.font('Helvetica-Bold')
+         .fontSize(styles.sectionTitle.fontSize)
+         .fillColor(styles.sectionTitle.color)
+         .text('Registration Information', 50, doc.y);
+      doc.moveDown(0.7);
+      doc.font('Helvetica-Bold')
+         .fontSize(12)
+         .fillColor('#000000')
+         .text('Registration ID / Enrollment ID / Roll No.: ', 50, doc.y, {
+           continued: true,
+           align: 'left'
+         })
+         .font('Helvetica')
+         .text(data.enrollment_id);
+      doc.moveDown(1.5);
 
       // Course & Payment Details Section
       createSection('Course Details', [
@@ -95,7 +104,8 @@ const generateEnrollmentPDF = async (data) => {
         ['Course ID', data.course_id],
         ['Course Fee', 'Rs. ' + data.course_fee],
         ['Discount', 'Rs. ' + ((data.course_fee - data.payment_amount) || 0)],
-        ['Fee Paid', 'Rs. ' + (data.payment_amount || data.course_fee)],
+        ['Net Course Fee', 'Rs. ' + (data.payment_amount || data.course_fee)],
+        ['Amount Paid', 'Rs. ' + (data.payment_amount || data.course_fee)],
         ['Payment ID', data.payment_id || 'N/A'],
         ['Payment Status', data.enrollment_status === 'completed' ? 'Completed' : 'Pending'],
         ['Payment Date', data.payment_date ? new Date(data.payment_date).toLocaleDateString('en-IN') : 'N/A'],

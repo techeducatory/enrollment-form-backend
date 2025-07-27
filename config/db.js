@@ -236,6 +236,39 @@ const initializeTables = async () => {
       )
     `);
 
+    // Create student_details table
+    await pool.query(`
+      CREATE TABLE IF NOT EXISTS student_details (
+        id INT AUTO_INCREMENT PRIMARY KEY,
+        first_name VARCHAR(100) NOT NULL,
+        last_name VARCHAR(100) NOT NULL,
+        roll_no VARCHAR(50) NOT NULL UNIQUE,
+        email VARCHAR(100) NOT NULL UNIQUE,
+        phone VARCHAR(15) NOT NULL UNIQUE,
+        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+        updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+      )
+    `);
+
+    // Modify coupons table to add student_id and coupon_type
+    const [couponColumns] = await pool.query(`
+      SELECT COLUMN_NAME 
+      FROM INFORMATION_SCHEMA.COLUMNS 
+      WHERE TABLE_SCHEMA = DATABASE()
+      AND TABLE_NAME = 'coupons'
+    `);
+
+    const existingCouponColumns = couponColumns.map(col => col.COLUMN_NAME);
+
+    if (!existingCouponColumns.includes('student_id')) {
+      await pool.query(`
+        ALTER TABLE coupons 
+        ADD COLUMN student_id INT NULL,
+        ADD COLUMN coupon_type ENUM('referral', 'student') DEFAULT 'referral',
+        ADD FOREIGN KEY (student_id) REFERENCES student_details(id)
+      `);
+    }
+
     // After creating or if tables exist, run updates
     await updateTables();
 
