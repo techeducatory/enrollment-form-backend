@@ -20,7 +20,7 @@ exports.createEnrollment = async (req, res) => {
 
     // Step 1: Check for existing enrollment in this course (any status)
     const [existingEnrollments] = await connection.query(
-      `SELECT enrollment_id, course_name, enrollment_status
+      `SELECT enrollment_id, course_name, enrollment_status, email, phone, aadhar_number
        FROM enrollments
        WHERE (email = ? OR phone = ? OR aadhar_number = ?)
        AND course_name = ?`,
@@ -75,8 +75,8 @@ exports.createEnrollment = async (req, res) => {
         }
 
         await connection.commit();
-
-        const emailHtml = buildEmailHtml(firstName, lastName, email, phone, courseName, existing.enrollment_id);
+        const fullAddress = `${address}, ${city}, ${district}, ${state}, ${pinCode}`;
+        const emailHtml = buildEmailHtml(firstName, lastName, email, phone, courseName, existing.enrollment_id, courseId, aadharNumber, fullAddress);
         const attachments = [
           {
             filename: 'already-registered.jpg',
@@ -86,7 +86,7 @@ exports.createEnrollment = async (req, res) => {
 
         await sendEmail(
           email,
-          'Registration Updated with Educatory',
+          'Your Basic Details has been updated with Educatory',
           emailHtml,
           attachments
         );
@@ -98,11 +98,20 @@ exports.createEnrollment = async (req, res) => {
           message: 'Pending enrollment updated successfully'
         });
       } else {
-        // Block duplicate enrollment
+        let matchedFields = [];
+        if (existingEnrollments.length > 0) {
+          const match = existingEnrollments[0];
+          console.log('match', match);
+          if (match.email === email) matchedFields.push('email');
+          if (match.phone === phone) matchedFields.push('mobile');
+          if (match.aadhar_number === aadharNumber) matchedFields.push('aadhar');
+        }
+
         return res.status(400).json({
           success: false,
-          duplicateCourse: true,
-          message: `You are already enrolled in "${courseName}".`,
+          existingStudent: true,
+          matchedFields,
+          message: `Existing student found with same ${matchedFields.join(', ')} in this course`,
           warningMessage: `You are already enrolled in "${courseName}" with Registration ID "${existing.enrollment_id}". Each student can enroll only once in a course.`
         });
       }
@@ -113,15 +122,24 @@ exports.createEnrollment = async (req, res) => {
       `SELECT enrollment_id
        FROM enrollments
        WHERE (email = ? OR phone = ? OR aadhar_number = ?)
-       AND enrollment_status = 'completed'`,
-      [email, phone, aadharNumber]
+       AND enrollment_status = 'completed' AND course_id = ?`,
+      [email, phone, aadharNumber, courseId]
     );
 
     if (existingCompleted.length > 0) {
+      let matchedFields = [];
+      if (existingCompleted.length > 0) {
+        const match = existingCompleted[0];
+        if (match.email === email) matchedFields.push('email');
+        if (match.phone === phone) matchedFields.push('mobile');
+        if (match.aadhar_number === aadharNumber) matchedFields.push('aadhar');
+      }
+
       return res.status(400).json({
         success: false,
         existingStudent: true,
-        message: 'Existing student found',
+        matchedFields,
+        message: `Existing student found with same ${matchedFields.join(', ')}`,
         warningMessage: `As an existing student (Registration ID: ${existingCompleted[0].enrollment_id}), you cannot use referral codes. However, you can still enroll in this new course.`
       });
     }
@@ -142,8 +160,8 @@ exports.createEnrollment = async (req, res) => {
     }
 
     await connection.commit();
-
-    const emailHtml = buildEmailHtml(firstName, lastName, email, phone, courseName, enrollmentId);
+    const fullAddress = `${address}, ${city}, ${district}, ${state}, ${pinCode}`;
+    const emailHtml = buildEmailHtml(firstName, lastName, email, phone, courseName, enrollmentId, courseId, aadharNumber, fullAddress);
     const attachments = [
       {
         filename: 'already-registered.jpg',
@@ -174,24 +192,33 @@ exports.createEnrollment = async (req, res) => {
 };
 
 // Helper to build the email HTML
-function buildEmailHtml(firstName, lastName, email, phone, courseName, enrollmentId) {
+function buildEmailHtml(firstName, lastName, email, phone, courseName, enrollmentId, courseId, aadharNumber, address) {
   return `
     <p>Dear ${firstName} ${lastName},</p>
     <p>Thank you for initiating your registration with <strong>Educatory</strong>!</p>
     <div style="background-color: #f8f9fa; padding: 15px; border-radius: 5px; margin: 20px 0;">
-      <p style="margin: 5px 0;"><strong>Important Details:</strong></p>
+      <p style="margin: 5px 0;"><strong>Registration Details:</strong></p>
       <ul style="list-style-type: none; padding-left: 0;">
         <li>• Registration ID: <strong>${enrollmentId}</strong></li>
-        <li>• Course: <strong>${courseName}</strong></li>
-        <li>• Email: <strong>${email}</strong></li>
+        <li>• Course Name: <strong>${courseName}</strong></li>
+        <li>• Course ID: <strong>${courseId}</strong></li>
+      </ul>
+    </div>
+    <div style="background-color: #e3f2fd; padding: 15px; border-radius: 5px; margin: 20px 0;">
+      <p style="margin: 5px 0;"><strong>Details you have filled till now:</strong></p>
+      <ul style="list-style-type: none; padding-left: 0;">
+        <li>• Name: <strong>${firstName} ${lastName}</strong></li>
+        <li>• Aadhar No: <strong>${aadharNumber}</strong></li>
         <li>• Phone: <strong>${phone}</strong></li>
+        <li>• Email: <strong>${email}</strong></li>
+        <li>• Address: <strong>${address}</strong></li>
       </ul>
     </div>
     <hr>
     <p style="color:#d32f2f;"><strong>In case of any disruption during registration:</strong></p>
     <ol>
       <li><a href="https://register.educatory.ac" target="_blank" style="color:#2563eb;text-decoration:underline;">Click Here</a></li>
-      <li>Click on <strong>Enroll Now</strong> for the "<strong>Organic Chemistry Excellence Program</strong>"</li>
+      <li>Click on <strong>Enroll Now</strong> for the "<strong>${courseName}</strong>"</li>
       <li>Then click on the <strong>Already Registered</strong> Button (see image below)</li>
     </ol>
     <p style="margin-top:10px;">Refer to the attached image for guidance.</p>
@@ -651,12 +678,12 @@ exports.getEnrollment = async (req, res) => {
 // Get enrollment by email or enrollment ID
 exports.getEnrollmentByEmailOrId = async (req, res) => {
   try {
-    const { userInput } = req.body;
+    const { userInput, courseId } = req.body;
 
     const [rows] = await pool.query(
       `SELECT * FROM enrollments 
-       WHERE enrollment_id = ? OR email = ?`,
-      [userInput, userInput]
+       WHERE (enrollment_id = ? OR email = ?) AND course_id = ?`,
+      [userInput, userInput, courseId]
     );
 
     if (rows.length === 0) {
